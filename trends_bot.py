@@ -158,61 +158,80 @@ async def fetch_tiktok_trends() -> list:
     return hashtags[:10]
 
 async def fetch_pinterest_trends() -> list:
-    """Трендовые идеи с Pinterest по нише блогера"""
-    pins = []
-    queries = [
-        "travel with baby",
-        "mom travel aesthetic",
-        "expat mom life",
-        "baby travel tips",
-        "reels ideas travel",
-    ]
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            for query in queries[:3]:
-                try:
-                    url = f"https://www.pinterest.com/search/pins/?q={query.replace(chr(32), '+')}&rs=typed"
-                    resp = await client.get(url, headers={
-                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    })
-                    soup = BeautifulSoup(resp.text, "html.parser")
+    """Генерируем Pinterest-style тренды через Claude API или фиксированный список"""
+    month = datetime.now().month
+    season_map = {
+        12: "зима", 1: "зима", 2: "зима",
+        3: "весна", 4: "весна", 5: "весна",
+        6: "лето", 7: "лето", 8: "лето",
+        9: "осень", 10: "осень", 11: "осень",
+    }
+    season = season_map.get(month, "весна")
 
-                    # Ищем заголовки пинов
-                    titles = []
-                    for tag in ["h3", "h2"]:
-                        elements = soup.find_all(tag)
-                        for el in elements[:5]:
-                            text = el.get_text(strip=True)
-                            if text and len(text) > 5 and len(text) < 100:
-                                titles.append(text)
+    if ANTHROPIC_API_KEY:
+        try:
+            prompt = f"""Ты эксперт по Pinterest трендам. Сейчас {season}, апрель 2026 года.
 
-                    # Ищем alt-тексты картинок
-                    for img in soup.find_all("img", alt=True)[:10]:
-                        alt = img.get("alt", "").strip()
-                        if alt and len(alt) > 10 and len(alt) < 100:
-                            titles.append(alt)
+Блогер @katekorostyleva: путешествия + материнство + жизнь в Сербии, малыш 9 месяцев.
 
-                    if titles:
-                        pins.append({
-                            "query": query,
-                            "ideas": titles[:3]
-                        })
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    print(f"Ошибка Pinterest query {query}: {e}")
-    except Exception as e:
-        print(f"Ошибка Pinterest: {e}")
+Назови 9 трендовых Pinterest-тем для её ниши прямо сейчас. Сгруппируй по 3 темы в 3 категории:
+1. Путешествия с малышом
+2. Материнство и лайфстайл  
+3. Эстетика и визуал
 
-    # Если парсинг не сработал — возвращаем трендовые темы ниши
-    if not pins:
-        pins = [
-            {"query": "travel with baby", "ideas": ["Baby travel essentials", "Flying with infant tips", "Baby travel outfits"]},
-            {"query": "mom travel aesthetic", "ideas": ["Minimalist mom travel", "Travel with toddler packing", "Mom travel style"]},
-            {"query": "expat mom life", "ideas": ["Expat family lifestyle", "Living abroad with baby", "Digital nomad mom"]},
-        ]
-    return pins
+Для каждой темы дай короткое название (3-5 слов) на английском как Pinterest-запрос.
+Отвечай ТОЛЬКО в формате JSON без markdown:
+{{"travel": ["тема1", "тема2", "тема3"], "motherhood": ["тема1", "тема2", "тема3"], "aesthetic": ["тема1", "тема2", "тема3"]}}"""
+
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={{
+                        "x-api-key": ANTHROPIC_API_KEY,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json"
+                    }},
+                    json={{
+                        "model": "claude-sonnet-4-20250514",
+                        "max_tokens": 300,
+                        "messages": [{{"role": "user", "content": prompt}}]
+                    }}
+                )
+                data = resp.json()
+                text = data["content"][0]["text"].strip()
+                parsed = json.loads(text)
+                return [
+                    {{"query": "✈️ Путешествия с малышом", "ideas": parsed.get("travel", [])}},
+                    {{"query": "👶 Материнство и лайфстайл", "ideas": parsed.get("motherhood", [])}},
+                    {{"query": "🎨 Эстетика и визуал", "ideas": parsed.get("aesthetic", [])}},
+                ]
+        except Exception as e:
+            print(f"Ошибка Pinterest AI: {{e}}")
+
+    # Fallback — сезонные темы
+    seasonal = {{
+        "зима": [
+            {{"query": "✈️ Путешествия с малышом", "ideas": ["Winter baby travel", "Baby beach holiday", "Warm country with infant"]}},
+            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Winter baby activities", "Cozy mom life", "Baby winter outfits"]}},
+            {{"query": "🎨 Эстетика и визуал", "ideas": ["Warm tones winter", "Cozy aesthetic reels", "Golden hour baby photos"]}},
+        ],
+        "весна": [
+            {{"query": "✈️ Путешествия с малышом", "ideas": ["Spring travel baby", "Europe with infant", "City walks with stroller"]}},
+            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Spring mom outfits", "Baby spring activities", "Outdoor baby play"]}},
+            {{"query": "🎨 Эстетика и визуал", "ideas": ["Soft spring aesthetic", "Pastel reels", "Blooming city photos"]}},
+        ],
+        "лето": [
+            {{"query": "✈️ Путешествия с малышом", "ideas": ["Beach baby travel", "Summer family trip", "Pool with infant"]}},
+            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Summer mom life", "Baby beach day", "Outdoor dining baby"]}},
+            {{"query": "🎨 Эстетика и визуал", "ideas": ["Golden hour summer", "Blue tones aesthetic", "Summer reels vibe"]}},
+        ],
+        "осень": [
+            {{"query": "✈️ Путешествия с малышом", "ideas": ["Autumn city travel", "Fall family trip", "Europe autumn baby"]}},
+            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Fall mom outfits", "Baby autumn walk", "Cozy family home"]}},
+            {{"query": "🎨 Эстетика и визуал", "ideas": ["Warm autumn tones", "Orange aesthetic reels", "Fall vibes content"]}},
+        ],
+    }}
+    return seasonal.get(season, seasonal["весна"])
 
 async def generate_reels_ideas(youtube_videos: list, trends: list, pinterest: list = []) -> str:
     """Генерируем идеи для рилсов через Claude API"""
@@ -411,5 +430,5 @@ async def main():
     await asyncio.gather(scheduler(), poll_commands())
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(
 
