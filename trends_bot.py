@@ -22,6 +22,13 @@ NICHE_TOPICS = [
     "mom travel",
     "expat mom",
     "traveling with infant",
+    "материнство в грузии",
+    "материнство в европе",
+    "it мама",
+    "it mother",
+    "жизнь в азии с семьей",
+    "мама мальчика",
+    "mother of boy"
 ]
 
 # Время отправки дайджеста (час по UTC, 9:00 Belgrade = 7:00 UTC)
@@ -150,7 +157,64 @@ async def fetch_tiktok_trends() -> list:
         ]
     return hashtags[:10]
 
-async def generate_reels_ideas(youtube_videos: list, trends: list) -> str:
+async def fetch_pinterest_trends() -> list:
+    """Трендовые идеи с Pinterest по нише блогера"""
+    pins = []
+    queries = [
+        "travel with baby",
+        "mom travel aesthetic",
+        "expat mom life",
+        "baby travel tips",
+        "reels ideas travel",
+    ]
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            for query in queries[:3]:
+                try:
+                    url = f"https://www.pinterest.com/search/pins/?q={query.replace(chr(32), '+')}&rs=typed"
+                    resp = await client.get(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    })
+                    soup = BeautifulSoup(resp.text, "html.parser")
+
+                    # Ищем заголовки пинов
+                    titles = []
+                    for tag in ["h3", "h2"]:
+                        elements = soup.find_all(tag)
+                        for el in elements[:5]:
+                            text = el.get_text(strip=True)
+                            if text and len(text) > 5 and len(text) < 100:
+                                titles.append(text)
+
+                    # Ищем alt-тексты картинок
+                    for img in soup.find_all("img", alt=True)[:10]:
+                        alt = img.get("alt", "").strip()
+                        if alt and len(alt) > 10 and len(alt) < 100:
+                            titles.append(alt)
+
+                    if titles:
+                        pins.append({
+                            "query": query,
+                            "ideas": titles[:3]
+                        })
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"Ошибка Pinterest query {query}: {e}")
+    except Exception as e:
+        print(f"Ошибка Pinterest: {e}")
+
+    # Если парсинг не сработал — возвращаем трендовые темы ниши
+    if not pins:
+        pins = [
+            {"query": "travel with baby", "ideas": ["Baby travel essentials", "Flying with infant tips", "Baby travel outfits"]},
+            {"query": "mom travel aesthetic", "ideas": ["Minimalist mom travel", "Travel with toddler packing", "Mom travel style"]},
+            {"query": "expat mom life", "ideas": ["Expat family lifestyle", "Living abroad with baby", "Digital nomad mom"]},
+        ]
+    return pins
+
+async def generate_reels_ideas(youtube_videos: list, trends: list, pinterest: list = []) -> str:
     """Генерируем идеи для рилсов через Claude API"""
     if not ANTHROPIC_API_KEY:
         return generate_ideas_fallback(youtube_trends=youtube_videos, trends=trends)
@@ -159,6 +223,7 @@ async def generate_reels_ideas(youtube_videos: list, trends: list) -> str:
         youtube_titles = "\n".join([f"- {v['title']}" for v in youtube_videos[:5]])
         trend_list = "\n".join([f"- {t}" for t in trends[:5]])
 
+        pinterest_str = chr(10).join([f"- {p['query']}: {', '.join(p['ideas'][:2])}" for p in pinterest[:3]])
         prompt = f"""Ты помогаешь Instagram-блогеру @katekorostyleva придумывать идеи для рилсов.
 
 Её ниша: путешествия + материнство + жизнь в Сербии. У неё малыш 9 месяцев. Она много путешествует и живёт за рубежом.
@@ -168,6 +233,9 @@ async def generate_reels_ideas(youtube_videos: list, trends: list) -> str:
 
 Трендовые поисковые запросы:
 {trend_list}
+
+Трендовые идеи с Pinterest:
+{pinterest_str}
 
 Придумай 5 конкретных идей для рилсов. Для каждой идеи напиши:
 1. Цепляющее начало (первые 2 секунды)
@@ -220,7 +288,7 @@ def generate_ideas_fallback(youtube_trends: list, trends: list) -> str:
 Начало: "Как уложить малыша в незнакомом месте"
 Формат: конкретный совет за 15 секунд"""
 
-def format_digest(trends: list, videos: list, hashtags: list, ideas: str) -> str:
+def format_digest(trends: list, videos: list, hashtags: list, pinterest: list, ideas: str) -> str:
     today = datetime.now().strftime("%d.%m.%Y")
 
     msg = f"🌅 <b>Утренний дайджест трендов — {today}</b>\n\n"
@@ -256,18 +324,20 @@ async def send_digest():
     trends_task = asyncio.create_task(fetch_google_trends())
     youtube_task = asyncio.create_task(fetch_youtube_trends())
     tiktok_task = asyncio.create_task(fetch_tiktok_trends())
+    pinterest_task = asyncio.create_task(fetch_pinterest_trends())
 
     trends = await trends_task
     videos = await youtube_task
     hashtags = await tiktok_task
+    pinterest = await pinterest_task
 
-    print(f"Trends: {len(trends)}, Videos: {len(videos)}, Hashtags: {len(hashtags)}")
+    print(f"Trends: {len(trends)}, Videos: {len(videos)}, Hashtags: {len(hashtags)}, Pinterest: {len(pinterest)}")
 
     # Генерируем идеи через ИИ
-    ideas = await generate_reels_ideas(videos, trends)
+    ideas = await generate_reels_ideas(videos, trends, pinterest)
 
     # Формируем и отправляем дайджест
-    digest = format_digest(trends, videos, hashtags, ideas)
+    digest = format_digest(trends, videos, hashtags, pinterest, ideas)
     await send_all(digest)
 
     # Идеи отдельным сообщением
@@ -342,3 +412,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
