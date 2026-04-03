@@ -118,32 +118,57 @@ async def fetch_youtube_trends() -> list:
     if not YOUTUBE_API_KEY:
         return []
     videos = []
+
+    # Ротация тем по дню недели — каждый день разные запросы
+    day_of_week = datetime.now().weekday()  # 0=пн, 6=вс
+    topic_groups = [
+        ["путешествия с ребенком", "travel with baby", "baby travel tips"],
+        ["мама в путешествии", "mom travel vlog", "traveling mom"],
+        ["зимовка с малышом", "expat mom life", "living abroad baby"],
+        ["материнство за границей", "digital nomad mom", "expat family"],
+        ["жизнь в Сербии", "life in Serbia expat", "Belgrade family"],
+        ["it мама", "it mother remote work", "work from home mom baby"],
+        ["мама мальчика", "mother of boy", "boy mom travel"],
+    ]
+    todays_topics = topic_groups[day_of_week % len(topic_groups)]
+
+    # Последние 14 дней — свежие видео
+    from datetime import timedelta
+    published_after = (datetime.utcnow() - timedelta(days=14)).strftime("%Y-%m-%dT00:00:00Z")
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            for topic in NICHE_TOPICS[:3]:
-                params = {
-                    "part": "snippet",
-                    "q": topic,
-                    "type": "video",
-                    "order": "viewCount",
-                    "publishedAfter": "2026-03-20T00:00:00Z",
-                    "maxResults": 3,
-                    "key": YOUTUBE_API_KEY,
-                }
-                resp = await client.get(
-                    "https://www.googleapis.com/youtube/v3/search",
-                    params=params
-                )
-                data = resp.json()
-                for item in data.get("items", []):
-                    title = item.get("snippet", {}).get("title", "")
-                    video_id = item.get("id", {}).get("videoId", "")
-                    if title and video_id:
-                        videos.append({
-                            "title": title,
-                            "url": f"https://youtu.be/{video_id}",
-                        })
-                await asyncio.sleep(0.5)
+            for topic in todays_topics:
+                for order in ["date", "viewCount"]:
+                    params = {
+                        "part": "snippet",
+                        "q": topic,
+                        "type": "video",
+                        "order": order,
+                        "publishedAfter": published_after,
+                        "maxResults": 2,
+                        "key": YOUTUBE_API_KEY,
+                        "videoDuration": "short",  # короткие видео = рилсы
+                    }
+                    resp = await client.get(
+                        "https://www.googleapis.com/youtube/v3/search",
+                        params=params
+                    )
+                    data = resp.json()
+                    for item in data.get("items", []):
+                        title = item.get("snippet", {}).get("title", "")
+                        video_id = item.get("id", {}).get("videoId", "")
+                        channel = item.get("snippet", {}).get("channelTitle", "")
+                        published = item.get("snippet", {}).get("publishedAt", "")[:10]
+                        if title and video_id:
+                            videos.append({
+                                "title": title,
+                                "url": f"https://youtu.be/{video_id}",
+                                "channel": channel,
+                                "published": published,
+                                "topic": topic,
+                            })
+                    await asyncio.sleep(0.3)
     except Exception as e:
         print(f"Ошибка YouTube: {e}")
 
@@ -152,7 +177,7 @@ async def fetch_youtube_trends() -> list:
         if v["url"] not in seen:
             seen.add(v["url"])
             unique.append(v)
-    return unique[:6]
+    return unique[:8]
 
 # ──────────────────────────────────────────────
 # 3. ХЭШТЕГИ — фиксированные + AI обновление
