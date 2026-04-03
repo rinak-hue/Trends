@@ -7,38 +7,47 @@ from bs4 import BeautifulSoup
 
 # ============================================================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN_TRENDS", "ВСТАВЬ_СВОЙ_ТОКЕН")
-YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "ВСТАВЬ_YOUTUBE_КЛЮЧ")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 TELEGRAM_CHAT_IDS = ["248752467"]
 
-# Ниша блогера — темы для поиска трендов
 NICHE_TOPICS = [
+    # Русские
     "путешествия с ребенком",
     "мама в путешествии",
     "зимовка с малышом",
     "материнство за границей",
     "жизнь в Сербии",
+    "материнство в европе",
+    "жизнь в азии с семьей",
+    "мама мальчика",
+    "it мама",
+    # Английские
     "travel with baby",
     "mom travel",
     "expat mom",
     "traveling with infant",
-    "материнство в грузии",
-    "материнство в европе",
-    "it мама",
     "it mother",
-    "жизнь в азии с семьей",
-    "мама мальчика",
-    "mother of boy"
+    "mother of boy",
 ]
 
-# Время отправки дайджеста (час по UTC, 9:00 Belgrade = 7:00 UTC)
-SEND_HOUR_UTC = 7
+# Хэштеги на основе ниши
+NICHE_HASHTAGS = [
+    "#travelwithbaby", "#momtravel", "#babytravel",
+    "#expatlife", "#digitalnomadmom", "#travelingmom",
+    "#babytravels", "#familytravel", "#momabroad",
+    "#путешествиясребенком", "#материнство", "#жизньзаграницей",
+    "#мамавпутешествии", "#зимовкасмалышом", "#материнствозаграницей",
+    "#жизньвсербии", "#итмама", "#mamablogger",
+    "#motherofboy", "#mamaboy", "#expatmom",
+]
 
+SEND_HOUR_UTC = 7  # 09:00 Белград = 07:00 UTC
 # ============================================================
 
 async def send_telegram(text: str, chat_id: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15) as client:
         try:
             await client.post(url, json={
                 "chat_id": chat_id,
@@ -54,49 +63,72 @@ async def send_all(text: str):
         await send_telegram(text, chat_id)
         await asyncio.sleep(0.3)
 
+async def call_claude(prompt: str, max_tokens: int = 1000) -> str:
+    """Универсальный вызов Claude API"""
+    async with httpx.AsyncClient(timeout=30) as client:
+        resp = await client.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": ANTHROPIC_API_KEY,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json"
+            },
+            json={
+                "model": "claude-sonnet-4-20250514",
+                "max_tokens": max_tokens,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+        )
+        data = resp.json()
+        return data["content"][0]["text"]
+
+# ──────────────────────────────────────────────
+# 1. GOOGLE TRENDS — через веб-поиск
+# ──────────────────────────────────────────────
 async def fetch_google_trends() -> list:
-    """Получаем трендовые запросы через pytrends-совместимый endpoint"""
+    """Трендовые темы через поиск Google Trends RSS"""
     trends = []
     try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            # Trending searches Russia/Worldwide
-            for geo in ["RU", ""]:
-                url = "https://trends.google.com/trends/api/dailytrends"
-                params = {"hl": "ru", "tz": -180, "geo": geo, "ns": 15}
-                resp = await client.get(url, params=params)
-                # Google возвращает с префиксом )]}'\n
-                text = resp.text
-                if ")]}'" in text:
-                    text = text.split(")]}'\n", 1)[1]
-                data = json.loads(text)
-                items = data.get("default", {}).get("trendingSearchesDays", [])
-                for day in items[:1]:
-                    for item in day.get("trendingSearches", [])[:5]:
-                        title = item.get("title", {}).get("query", "")
-                        traffic = item.get("formattedTraffic", "")
-                        if title:
-                            trends.append(f"{title} ({traffic})")
-                await asyncio.sleep(1)
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            # Google Trends RSS — работает без API ключа
+            for geo in ["RU", "US"]:
+                resp = await client.get(
+                    f"https://trends.google.com/trends/trendingsearches/daily/rss?geo={geo}",
+                    headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+                )
+                soup = BeautifulSoup(resp.text, "lxml-xml")
+                items = soup.find_all("item")
+                for item in items[:5]:
+                    title = item.find("title")
+                    traffic = item.find("ht:approx_traffic")
+                    if title:
+                        t = title.get_text(strip=True)
+                        tr = traffic.get_text(strip=True) if traffic else ""
+                        trends.append(f"{t} {tr}".strip())
+                await asyncio.sleep(0.5)
     except Exception as e:
-        print(f"Ошибка Google Trends: {e}")
+        print(f"Ошибка Google Trends RSS: {e}")
 
-    return trends[:10]
+    return trends[:8]
 
+# ──────────────────────────────────────────────
+# 2. YOUTUBE
+# ──────────────────────────────────────────────
 async def fetch_youtube_trends() -> list:
-    """Топ видео в нише через YouTube Data API"""
+    if not YOUTUBE_API_KEY:
+        return []
     videos = []
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            for topic in NICHE_TOPICS[:4]:
+            for topic in NICHE_TOPICS[:3]:
                 params = {
                     "part": "snippet",
                     "q": topic,
                     "type": "video",
                     "order": "viewCount",
-                    "publishedAfter": "2026-03-26T00:00:00Z",
+                    "publishedAfter": "2026-03-20T00:00:00Z",
                     "maxResults": 3,
                     "key": YOUTUBE_API_KEY,
-                    "relevanceLanguage": "ru",
                 }
                 resp = await client.get(
                     "https://www.googleapis.com/youtube/v3/search",
@@ -105,271 +137,173 @@ async def fetch_youtube_trends() -> list:
                 data = resp.json()
                 for item in data.get("items", []):
                     title = item.get("snippet", {}).get("title", "")
-                    channel = item.get("snippet", {}).get("channelTitle", "")
                     video_id = item.get("id", {}).get("videoId", "")
                     if title and video_id:
                         videos.append({
                             "title": title,
-                            "channel": channel,
                             "url": f"https://youtu.be/{video_id}",
-                            "topic": topic
                         })
                 await asyncio.sleep(0.5)
     except Exception as e:
         print(f"Ошибка YouTube: {e}")
 
-    # Дедупликация
-    seen = set()
-    unique = []
+    seen, unique = set(), []
     for v in videos:
         if v["url"] not in seen:
             seen.add(v["url"])
             unique.append(v)
-    return unique[:8]
+    return unique[:6]
 
-async def fetch_tiktok_trends() -> list:
-    """Трендовые хэштеги с TikTok Creative Center"""
-    hashtags = []
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
-            # TikTok Creative Center — публичная страница трендов
-            resp = await client.get(
-                "https://ads.tiktok.com/business/creativecenter/trends/hashtag/pad/en",
-                headers={"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
-            )
-            soup = BeautifulSoup(resp.text, "html.parser")
-            # Ищем хэштеги на странице
-            tags = soup.find_all(string=lambda t: t and t.startswith("#"))
-            for tag in tags[:15]:
-                tag = tag.strip()
-                if len(tag) > 2 and tag not in hashtags:
-                    hashtags.append(tag)
-    except Exception as e:
-        print(f"Ошибка TikTok: {e}")
+# ──────────────────────────────────────────────
+# 3. ХЭШТЕГИ — фиксированные + AI обновление
+# ──────────────────────────────────────────────
+async def fetch_hashtags() -> list:
+    base = NICHE_HASHTAGS
 
-    # Если не нашли — возвращаем популярные хэштеги ниши
-    if not hashtags:
-        hashtags = [
-            "#travelwithbaby", "#momtravel", "#babytravel",
-            "#expatlife", "#digitalnomadmom", "#travelingmom",
-            "#babytravels", "#familytravel", "#momabroad",
-            "#materinstvo", "#путешествиясребенком"
-        ]
-    return hashtags[:10]
-
-async def fetch_pinterest_trends() -> list:
-    """Генерируем Pinterest-style тренды через Claude API или фиксированный список"""
-    month = datetime.now().month
-    season_map = {
-        12: "зима", 1: "зима", 2: "зима",
-        3: "весна", 4: "весна", 5: "весна",
-        6: "лето", 7: "лето", 8: "лето",
-        9: "осень", 10: "осень", 11: "осень",
-    }
-    season = season_map.get(month, "весна")
-
-    if ANTHROPIC_API_KEY:
-        try:
-            prompt = f"""Ты эксперт по Pinterest трендам. Сейчас {season}, апрель 2026 года.
-
-Блогер @katekorostyleva: путешествия + материнство + жизнь в Сербии, малыш 9 месяцев.
-
-Назови 9 трендовых Pinterest-тем для её ниши прямо сейчас. Сгруппируй по 3 темы в 3 категории:
-1. Путешествия с малышом
-2. Материнство и лайфстайл  
-3. Эстетика и визуал
-
-Для каждой темы дай короткое название (3-5 слов) на английском как Pinterest-запрос.
-Отвечай ТОЛЬКО в формате JSON без markdown:
-{{"travel": ["тема1", "тема2", "тема3"], "motherhood": ["тема1", "тема2", "тема3"], "aesthetic": ["тема1", "тема2", "тема3"]}}"""
-
-            async with httpx.AsyncClient(timeout=20) as client:
-                resp = await client.post(
-                    "https://api.anthropic.com/v1/messages",
-                    headers={{
-                        "x-api-key": ANTHROPIC_API_KEY,
-                        "anthropic-version": "2023-06-01",
-                        "content-type": "application/json"
-                    }},
-                    json={{
-                        "model": "claude-sonnet-4-20250514",
-                        "max_tokens": 300,
-                        "messages": [{{"role": "user", "content": prompt}}]
-                    }}
-                )
-                data = resp.json()
-                text = data["content"][0]["text"].strip()
-                parsed = json.loads(text)
-                return [
-                    {{"query": "✈️ Путешествия с малышом", "ideas": parsed.get("travel", [])}},
-                    {{"query": "👶 Материнство и лайфстайл", "ideas": parsed.get("motherhood", [])}},
-                    {{"query": "🎨 Эстетика и визуал", "ideas": parsed.get("aesthetic", [])}},
-                ]
-        except Exception as e:
-            print(f"Ошибка Pinterest AI: {{e}}")
-
-    # Fallback — сезонные темы
-    seasonal = {{
-        "зима": [
-            {{"query": "✈️ Путешествия с малышом", "ideas": ["Winter baby travel", "Baby beach holiday", "Warm country with infant"]}},
-            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Winter baby activities", "Cozy mom life", "Baby winter outfits"]}},
-            {{"query": "🎨 Эстетика и визуал", "ideas": ["Warm tones winter", "Cozy aesthetic reels", "Golden hour baby photos"]}},
-        ],
-        "весна": [
-            {{"query": "✈️ Путешествия с малышом", "ideas": ["Spring travel baby", "Europe with infant", "City walks with stroller"]}},
-            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Spring mom outfits", "Baby spring activities", "Outdoor baby play"]}},
-            {{"query": "🎨 Эстетика и визуал", "ideas": ["Soft spring aesthetic", "Pastel reels", "Blooming city photos"]}},
-        ],
-        "лето": [
-            {{"query": "✈️ Путешествия с малышом", "ideas": ["Beach baby travel", "Summer family trip", "Pool with infant"]}},
-            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Summer mom life", "Baby beach day", "Outdoor dining baby"]}},
-            {{"query": "🎨 Эстетика и визуал", "ideas": ["Golden hour summer", "Blue tones aesthetic", "Summer reels vibe"]}},
-        ],
-        "осень": [
-            {{"query": "✈️ Путешествия с малышом", "ideas": ["Autumn city travel", "Fall family trip", "Europe autumn baby"]}},
-            {{"query": "👶 Материнство и лайфстайл", "ideas": ["Fall mom outfits", "Baby autumn walk", "Cozy family home"]}},
-            {{"query": "🎨 Эстетика и визуал", "ideas": ["Warm autumn tones", "Orange aesthetic reels", "Fall vibes content"]}},
-        ],
-    }}
-    return seasonal.get(season, seasonal["весна"])
-
-async def generate_reels_ideas(youtube_videos: list, trends: list, pinterest: list = []) -> str:
-    """Генерируем идеи для рилсов через Claude API"""
     if not ANTHROPIC_API_KEY:
-        return generate_ideas_fallback(youtube_trends=youtube_videos, trends=trends)
+        return base
 
     try:
-        youtube_titles = "\n".join([f"- {v['title']}" for v in youtube_videos[:5]])
-        trend_list = "\n".join([f"- {t}" for t in trends[:5]])
-
-        pinterest_str = chr(10).join([f"- {p['query']}: {', '.join(p['ideas'][:2])}" for p in pinterest[:3]])
-        prompt = f"""Ты помогаешь Instagram-блогеру @katekorostyleva придумывать идеи для рилсов.
-
-Её ниша: путешествия + материнство + жизнь в Сербии. У неё малыш 9 месяцев. Она много путешествует и живёт за рубежом.
-
-Сегодняшние тренды в YouTube по её теме:
-{youtube_titles}
-
-Трендовые поисковые запросы:
-{trend_list}
-
-Трендовые идеи с Pinterest:
-{pinterest_str}
-
-Придумай 5 конкретных идей для рилсов. Для каждой идеи напиши:
-1. Цепляющее начало (первые 2 секунды)
-2. Формат (эмоциональный контраст / практичный совет / день из жизни / вопрос-ответ)
-3. Хук для описания
-
-Пиши коротко и конкретно. Отвечай на русском."""
-
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": ANTHROPIC_API_KEY,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json"
-                },
-                json={
-                    "model": "claude-sonnet-4-20250514",
-                    "max_tokens": 1000,
-                    "messages": [{"role": "user", "content": prompt}]
-                }
-            )
-            data = resp.json()
-            return data["content"][0]["text"]
+        today = datetime.now().strftime("%B %Y")
+        result = await call_claude(
+            f"Какие 5 трендовых Instagram хэштегов сейчас ({today}) для блогера в нише: путешествия с ребёнком, IT-мама, мама мальчика, материнство за границей (Сербия, Азия, Европа), зимовка с малышом? "
+            f"Ответь ТОЛЬКО списком хэштегов через пробел, без объяснений. Пример: #tag1 #tag2 #tag3",
+            max_tokens=100
+        )
+        ai_tags = [t.strip() for t in result.split() if t.startswith("#")]
+        return ai_tags + base[:6] if ai_tags else base
     except Exception as e:
-        print(f"Ошибка Claude API: {e}")
-        return generate_ideas_fallback(youtube_videos, trends)
+        print(f"Ошибка hashtags AI: {e}")
+        return base
 
-def generate_ideas_fallback(youtube_trends: list, trends: list) -> str:
-    """Запасные идеи если Claude API недоступен"""
-    return """💡 Идеи для рилсов на сегодня:
+# ──────────────────────────────────────────────
+# 4. PINTEREST — через Claude AI
+# ──────────────────────────────────────────────
+async def fetch_pinterest_trends() -> list:
+    month = datetime.now().month
+    season = {12:"зима",1:"зима",2:"зима",3:"весна",4:"весна",5:"весна",
+               6:"лето",7:"лето",8:"лето",9:"осень",10:"осень",11:"осень"}.get(month,"весна")
 
-1. 🎬 Эмоциональный контраст
-Начало: "9 месяцев я боялась путешествовать с малышом..."
-Формат: до/после, ожидание vs реальность
+    if not ANTHROPIC_API_KEY:
+        return [
+            {"category": "✈️ Путешествия", "ideas": ["Baby travel essentials", "Flying with infant", "Travel with stroller"]},
+            {"category": "👶 Материнство", "ideas": ["Mom life abroad", "Baby milestones", "Expat family"]},
+            {"category": "🎨 Визуал", "ideas": ["Soft aesthetic reels", "Golden hour baby", "Pastel tones content"]},
+        ]
 
-2. 🎬 Практичный совет
-Начало: "3 вещи которые я беру в самолёт с ребёнком"
-Формат: список с демонстрацией
+    try:
+        result = await call_claude(
+            f"Сейчас {season} 2026. Блогер: путешествия + материнство + Сербия, малыш 9 месяцев.\n"
+            f"Дай 9 трендовых Pinterest-тем для её контента. JSON без markdown:\n"
+            f'{{\"travel\": [\"тема1\", \"тема2\", \"тема3\"], \"motherhood\": [\"тема1\", \"тема2\", \"тема3\"], \"aesthetic\": [\"тема1\", \"тема2\", \"тема3\"]}}',
+            max_tokens=300
+        )
+        text = result.strip()
+        if "```" in text:
+            text = text.split("```")[1].replace("json", "").strip()
+        parsed = json.loads(text)
+        return [
+            {"category": "✈️ Путешествия", "ideas": parsed.get("travel", [])},
+            {"category": "👶 Материнство", "ideas": parsed.get("motherhood", [])},
+            {"category": "🎨 Визуал", "ideas": parsed.get("aesthetic", [])},
+        ]
+    except Exception as e:
+        print(f"Ошибка Pinterest AI: {e}")
+        return [
+            {"category": "✈️ Путешествия", "ideas": ["Baby travel essentials", "Flying with infant", "Travel with stroller"]},
+            {"category": "👶 Материнство", "ideas": ["Mom life abroad", "Baby milestones travel", "Expat mom life"]},
+            {"category": "🎨 Визуал", "ideas": ["Soft aesthetic content", "Golden hour reels", "Pastel spring tones"]},
+        ]
 
-3. 🎬 День из жизни
-Начало: "Утро в Белграде с 9-месячным малышом"
-Формат: таймлапс дня, честно и с юмором
+# ──────────────────────────────────────────────
+# 5. ИДЕИ ДЛЯ РИЛСОВ через Claude
+# ──────────────────────────────────────────────
+async def generate_reels_ideas(videos: list, trends: list, pinterest: list) -> str:
+    if not ANTHROPIC_API_KEY:
+        return (
+            "1. 🎬 Эмоциональный контраст\n"
+            "Начало: «9 месяцев я боялась путешествовать...»\n\n"
+            "2. 🎬 Практичный совет\n"
+            "Начало: «3 вещи в самолёт с ребёнком»\n\n"
+            "3. 🎬 День из жизни\n"
+            "Начало: «Утро в Белграде с малышом»\n\n"
+            "4. 🎬 Вопрос-ответ\n"
+            "Начало: «Как я путешествую с ребёнком одна?»\n\n"
+            "5. 🎬 Лайфхак\n"
+            "Начало: «Как уложить малыша в незнакомом месте»"
+        )
 
-4. 🎬 Вопрос-ответ
-Начало: "Все спрашивают как я путешествую с ребёнком одна"
-Формат: отвечаю на топ вопросы
+    today = datetime.now().strftime("%d %B %Y")
+    yt = "\n".join([f"- {v['title'][:60]}" for v in videos[:4]]) or "нет данных"
+    tr = "\n".join([f"- {t}" for t in trends[:5]]) or "нет данных"
+    pin = "\n".join([f"- {p['category']}: {', '.join(p['ideas'][:2])}" for p in pinterest]) or "нет данных"
 
-5. 🎬 Лайфхак
-Начало: "Как уложить малыша в незнакомом месте"
-Формат: конкретный совет за 15 секунд"""
+    try:
+        result = await call_claude(
+            f"Сегодня {today}. Помоги блогеру @katekorostyleva придумать 5 идей для рилсов.\n\n"
+            f"Ниша: путешествия + материнство + жизнь в Сербии. Малыш 9 месяцев.\n\n"
+            f"YouTube тренды:\n{yt}\n\n"
+            f"Google тренды:\n{tr}\n\n"
+            f"Pinterest темы:\n{pin}\n\n"
+            f"Для каждой идеи напиши:\n"
+            f"- Цепляющее начало (первые 2 секунды)\n"
+            f"- Формат\n"
+            f"- Хук для описания\n\n"
+            f"Идеи должны быть разными каждый день и учитывать актуальные тренды выше. Пиши на русском.",
+            max_tokens=1000
+        )
+        return result
+    except Exception as e:
+        print(f"Ошибка ideas AI: {e}")
+        return "Идеи временно недоступны — проверь ANTHROPIC_API_KEY"
 
-def format_digest(trends: list, videos: list, hashtags: list, pinterest: list, ideas: str) -> str:
-    today = datetime.now().strftime("%d.%m.%Y")
-
-    msg = f"🌅 <b>Утренний дайджест трендов — {today}</b>\n\n"
-
-    # Google Trends
-    msg += "📈 <b>Google Trends сегодня:</b>\n"
-    if trends:
-        for t in trends[:5]:
-            msg += f"• {t}\n"
-    else:
-        msg += "• Данные недоступны\n"
-    msg += "\n"
-
-    # YouTube
-    msg += "📺 <b>Топ YouTube в твоей нише:</b>\n"
-    if videos:
-        for v in videos[:4]:
-            msg += f"• <a href='{v['url']}'>{v['title'][:50]}...</a>\n"
-    else:
-        msg += "• Данные недоступны\n"
-    msg += "\n"
-
-    # TikTok хэштеги
-    msg += "🎵 <b>Трендовые хэштеги:</b>\n"
-    msg += " ".join(hashtags[:8]) + "\n\n"
-
-    return msg
-
+# ──────────────────────────────────────────────
+# СБОРКА ДАЙДЖЕСТА
+# ──────────────────────────────────────────────
 async def send_digest():
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Собираю дайджест...")
 
-    # Собираем данные параллельно
-    trends_task = asyncio.create_task(fetch_google_trends())
-    youtube_task = asyncio.create_task(fetch_youtube_trends())
-    tiktok_task = asyncio.create_task(fetch_tiktok_trends())
-    pinterest_task = asyncio.create_task(fetch_pinterest_trends())
+    trends, videos, hashtags, pinterest = await asyncio.gather(
+        fetch_google_trends(),
+        fetch_youtube_trends(),
+        fetch_hashtags(),
+        fetch_pinterest_trends(),
+    )
 
-    trends = await trends_task
-    videos = await youtube_task
-    hashtags = await tiktok_task
-    pinterest = await pinterest_task
+    print(f"Trends:{len(trends)} YT:{len(videos)} Tags:{len(hashtags)} Pin:{len(pinterest)}")
 
-    print(f"Trends: {len(trends)}, Videos: {len(videos)}, Hashtags: {len(hashtags)}, Pinterest: {len(pinterest)}")
-
-    # Генерируем идеи через ИИ
     ideas = await generate_reels_ideas(videos, trends, pinterest)
 
-    # Формируем и отправляем дайджест
-    digest = format_digest(trends, videos, hashtags, pinterest, ideas)
-    await send_all(digest)
+    today = datetime.now().strftime("%d.%m.%Y")
+    msg = f"🌅 <b>Утренний дайджест — {today}</b>\n\n"
 
-    # Идеи отдельным сообщением
+    msg += "📈 <b>Google Trends:</b>\n"
+    msg += ("\n".join(f"• {t}" for t in trends[:5])) if trends else "• Данные недоступны"
+    msg += "\n\n"
+
+    msg += "📺 <b>YouTube в нише:</b>\n"
+    msg += ("\n".join(f"• <a href='{v['url']}'>{v['title'][:55]}...</a>" for v in videos[:4])) if videos else "• Данные недоступны"
+    msg += "\n\n"
+
+    msg += "🎵 <b>Хэштеги:</b>\n"
+    msg += " ".join(hashtags[:10])
+    msg += "\n\n"
+
+    msg += "📌 <b>Pinterest тренды:</b>\n"
+    for p in pinterest:
+        msg += f"<b>{p['category']}</b>: {' · '.join(p['ideas'])}\n"
+
+    await send_all(msg)
     await asyncio.sleep(1)
-    await send_all(f"💡 <b>5 идей для рилсов на сегодня:</b>\n\n{ideas}")
-
+    await send_all(f"💡 <b>5 идей для рилсов на {today}:</b>\n\n{ideas}")
     print("Дайджест отправлен!")
 
+# ──────────────────────────────────────────────
+# КОМАНДЫ И ПЛАНИРОВЩИК
+# ──────────────────────────────────────────────
 async def poll_commands():
-    """Слушаем команды от пользователя"""
     offset = None
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-
     async with httpx.AsyncClient(timeout=30) as client:
         while True:
             try:
@@ -382,41 +316,38 @@ async def poll_commands():
                     msg = update.get("message", {})
                     chat_id = str(msg.get("chat", {}).get("id", ""))
                     text = msg.get("text", "").strip()
-
                     if chat_id not in TELEGRAM_CHAT_IDS:
                         continue
-
                     if text == "/digest":
-                        await send_telegram("🔄 Собираю дайджест прямо сейчас...", chat_id)
+                        await send_telegram("🔄 Собираю дайджест...", chat_id)
                         asyncio.create_task(send_digest())
-
                     elif text == "/status":
-                        now = datetime.now()
                         await send_telegram(
                             f"⚙️ <b>Trends Bot</b>\n"
-                            f"Время: {now.strftime('%H:%M')} UTC\n"
-                            f"Дайджест: каждый день в 09:00 по Белграду\n\n"
-                            f"Команды:\n"
-                            f"/digest — получить дайджест прямо сейчас\n"
+                            f"Дайджест: каждый день в 09:00 (Белград)\n"
+                            f"Google Trends: ✅\n"
+                            f"YouTube: {'✅' if YOUTUBE_API_KEY else '❌ нет ключа'}\n"
+                            f"Pinterest AI: {'✅' if ANTHROPIC_API_KEY else '❌ нет ключа'}\n"
+                            f"Идеи AI: {'✅' if ANTHROPIC_API_KEY else '❌ нет ключа'}\n\n"
+                            f"/digest — дайджест прямо сейчас\n"
                             f"/status — этот экран",
                             chat_id
                         )
-
             except Exception as e:
                 print(f"Ошибка polling: {e}")
                 await asyncio.sleep(5)
 
 async def main():
     await send_all(
-        "✅ <b>Trends Bot запущен!</b>\n"
-        "Каждое утро в 09:00 (Белград) буду присылать:\n\n"
-        "📈 Google Trends по твоей нише\n"
-        "📺 Топ YouTube видео\n"
-        "🎵 Трендовые хэштеги TikTok\n"
-        "💡 5 идей для рилсов от ИИ\n\n"
-        "Команды:\n"
-        "/digest — получить дайджест прямо сейчас\n"
-        "/status — статус бота"
+        "✅ <b>Trends Bot v2 запущен!</b>\n"
+        "Каждое утро в 09:00 (Белград):\n\n"
+        "📈 Google Trends\n"
+        "📺 YouTube топ в нише\n"
+        "🎵 Трендовые хэштеги\n"
+        "📌 Pinterest тренды (AI)\n"
+        "💡 5 уникальных идей для рилсов (AI)\n\n"
+        "/digest — получить прямо сейчас\n"
+        "/status — статус"
     )
 
     async def scheduler():
@@ -424,11 +355,12 @@ async def main():
             now = datetime.utcnow()
             if now.hour == SEND_HOUR_UTC and now.minute == 0:
                 await send_digest()
-                await asyncio.sleep(61)  # пропускаем минуту чтобы не отправить дважды
+                await asyncio.sleep(61)
             await asyncio.sleep(30)
 
     await asyncio.gather(scheduler(), poll_commands())
 
 if __name__ == "__main__":
-    asyncio.run(main(
+    asyncio.run(main())
+
 
